@@ -1,0 +1,44 @@
+
+# Virtual environments
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Test and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local application configuration
+.env
+.env.*
+!.env.example
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+logs/
+downloads/
+*.part
+*.part.*
+*.tmp
+
+# Generated reports
+reports/

@@ -1,0 +1,68 @@
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyfetch"
+version = "0.1.0"
+description = "A reliable asynchronous download manager built with Python."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Mejbah Uddin Bhuiyan" }
+]
+keywords = [
+    "asyncio",
+    "download-manager",
+    "aiohttp",
+    "python",
+    "cli",
+]
+
+dependencies = [
+    "aiohttp>=3.10,<4",
+    "aiofiles>=24.1,<26",
+    "typer>=0.15,<1",
+    "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.9",
+    "mypy>=1.14",
+]
+
+[project.scripts]
+pyfetch = "pyfetch.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyfetch"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "ASYNC",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/pyfetch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
