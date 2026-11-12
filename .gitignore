@@ -44,3 +44,6 @@ downloads/
 reports/
 # Local PyFetch configuration
 pyfetch.json
+
+# Local HTTP test server
+test_server/
