@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pyfetch.config import DownloadConfig
-from pyfetch.downloader import download_file
+from pyfetch.downloader import ProgressCallback, download_file
 from pyfetch.exceptions import DownloadError, ValidationError
 from pyfetch.models import DownloadJob, DownloadStatus
 
@@ -63,11 +63,13 @@ def _validate_batch(jobs: Sequence[DownloadJob]) -> None:
 async def run_downloads(
     jobs: Sequence[DownloadJob],
     config: DownloadConfig,
+    *,
+    on_progress: ProgressCallback | None = None,
 ) -> BatchResult:
-    """Download multiple files within the configured concurrency limit.
+    """Download multiple files within the concurrency limit.
 
-    Individual known download failures do not stop unrelated jobs.
-    Cancelling the batch cancels all unfinished child tasks.
+    Known download failures do not stop unrelated jobs.
+    Cancelling the batch cancels unfinished child tasks.
     """
     snapshot = tuple(jobs)
 
@@ -79,22 +81,29 @@ async def run_downloads(
     semaphore = asyncio.Semaphore(config.max_concurrency)
 
     async def worker(job: DownloadJob) -> None:
-        """Run one download when a concurrency slot is available."""
+        """Execute a download when a semaphore slot is available."""
         try:
             async with semaphore:
                 try:
-                    await download_file(job, config)
+                    await download_file(
+                        job,
+                        config,
+                        on_progress=on_progress,
+                    )
+
                 except DownloadError:
-                    # The M3 downloader records FAILED status
-                    # and a useful error message on this job.
+                    # The downloader has already recorded
+                    # the failure on this individual job.
                     pass
 
         except asyncio.CancelledError:
-            # A job waiting for the semaphore has not entered
-            # the downloader, so we update its status here.
+            # Waiting jobs may never reach download_file().
             if job.status is DownloadStatus.QUEUED:
                 job.status = DownloadStatus.CANCELLED
                 job.error_message = "Batch cancelled before download started."
+
+                if on_progress is not None:
+                    on_progress(job)
 
             raise
 
@@ -104,7 +113,6 @@ async def run_downloads(
         await asyncio.gather(*tasks)
 
     finally:
-        # Also clean up child tasks if an unexpected exception occurs.
         unfinished = [task for task in tasks if not task.done()]
 
         for task in unfinished:

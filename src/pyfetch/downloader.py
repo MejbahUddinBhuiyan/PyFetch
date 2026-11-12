@@ -3,6 +3,7 @@
 import asyncio
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import aiofiles
@@ -17,6 +18,8 @@ from pyfetch.exceptions import (
 )
 from pyfetch.models import DownloadJob, DownloadStatus, utc_now
 
+ProgressCallback = Callable[[DownloadJob], None]
+
 
 async def _create_partial_file(destination: Path) -> Path:
     """Create a unique temporary file beside the target file."""
@@ -26,6 +29,8 @@ async def _create_partial_file(destination: Path) -> Path:
         exist_ok=True,
     )
 
+    # This short synchronous operation avoids a cancellation
+    # point between file creation and recording its path.
     fd, name = tempfile.mkstemp(
         prefix=".pyfetch-",
         suffix=".part",
@@ -39,6 +44,8 @@ async def _create_partial_file(destination: Path) -> Path:
 async def download_file(
     job: DownloadJob,
     config: DownloadConfig,
+    *,
+    on_progress: ProgressCallback | None = None,
 ) -> DownloadJob:
     """Download one HTTP(S) file without overwriting existing files."""
     if job.status is not DownloadStatus.QUEUED:
@@ -48,11 +55,15 @@ async def download_file(
 
     job.status = DownloadStatus.RUNNING
     job.started_at = utc_now()
+    job.completed_at = None
     job.error_message = None
     job.downloaded_bytes = 0
     job.total_bytes = None
 
     try:
+        if on_progress is not None:
+            on_progress(job)
+
         partial_path = await _create_partial_file(job.destination)
 
         timeout = aiohttp.ClientTimeout(
@@ -72,21 +83,25 @@ async def download_file(
 
                 job.total_bytes = response.content_length
 
+                if on_progress is not None:
+                    on_progress(job)
+
                 async with aiofiles.open(partial_path, "wb") as output:
                     async for chunk in response.content.iter_chunked(config.chunk_size):
                         await output.write(chunk)
                         job.downloaded_bytes += len(chunk)
+
+                        if on_progress is not None:
+                            on_progress(job)
 
         if job.total_bytes is not None and job.downloaded_bytes != job.total_bytes:
             raise DownloadNetworkError(
                 "Received byte count differs from Content-Length."
             )
 
-        # Create the final name only if it does not exist.
-        # The temporary file is on the same filesystem.
-        # This filesystem operation is intentionally short
-        # and atomic, with no await between publication
-        # and recording the completed status.
+        # Publish only after the transfer has completed.
+        # os.link refuses to replace an existing final file.
+        # This requires a filesystem that supports hard links.
         os.link(partial_path, job.file_path)
 
         job.status = DownloadStatus.COMPLETED
@@ -120,5 +135,9 @@ async def download_file(
         raise DownloadFileError(job.error_message) from exc
 
     finally:
-        if partial_path is not None:
-            partial_path.unlink(missing_ok=True)
+        try:
+            if partial_path is not None:
+                partial_path.unlink(missing_ok=True)
+        finally:
+            if on_progress is not None:
+                on_progress(job)

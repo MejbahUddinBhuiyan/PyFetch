@@ -15,6 +15,7 @@ from pyfetch.downloader import download_file
 from pyfetch.engine import run_downloads
 from pyfetch.exceptions import PyFetchError, ValidationError
 from pyfetch.models import DownloadJob
+from pyfetch.progress import DownloadProgress
 
 app = typer.Typer(
     name="pyfetch",
@@ -59,6 +60,7 @@ def doctor() -> None:
             "Environment: Python CLI\n"
             "Download engine: Basic streaming available (M3)\n"
             "Concurrent batch downloads: Available (M4)\n"
+            "Live progress tracking: Available (M5)\n"
             "Pause/resume: Not implemented yet",
             title="PyFetch Doctor",
             border_style="cyan",
@@ -89,7 +91,7 @@ def fetch(
         ),
     ] = None,
 ) -> None:
-    """Download one file safely using asynchronous streaming."""
+    """Download one file safely with a live progress display."""
     try:
         config = load_config()
 
@@ -103,7 +105,17 @@ def fetch(
 
         console.print(f"[cyan]Starting download:[/cyan] {job.filename}")
 
-        asyncio.run(download_file(job, config))
+        with DownloadProgress(
+            [job],
+            console=console,
+        ) as progress:
+            asyncio.run(
+                download_file(
+                    job,
+                    config,
+                    on_progress=progress.update,
+                )
+            )
 
         console.print("[bold green]Download completed![/bold green]")
         console.print(f"File: {job.file_path}")
@@ -179,7 +191,7 @@ def batch(
         ),
     ],
 ) -> None:
-    """Download multiple files with a concurrency limit."""
+    """Download multiple files with live progress and concurrency limits."""
     try:
         config = load_config()
 
@@ -193,7 +205,17 @@ def batch(
             f"(maximum concurrent: {config.max_concurrency})[/cyan]"
         )
 
-        result = asyncio.run(run_downloads(jobs, config))
+        with DownloadProgress(
+            jobs,
+            console=console,
+        ) as progress:
+            result = asyncio.run(
+                run_downloads(
+                    jobs,
+                    config,
+                    on_progress=progress.update,
+                )
+            )
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Batch interrupted by user.[/yellow]")
