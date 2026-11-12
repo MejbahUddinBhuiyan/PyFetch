@@ -54,3 +54,10 @@ batch-test/
 
 # manual test files
 progress-test.json
+
+# Persistent queue and SQLite runtime files
+pyfetch.db
+pyfetch.db.lock
+*.db-journal
+*.db-wal
+*.db-shm

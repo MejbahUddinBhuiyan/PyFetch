@@ -8,14 +8,21 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from pyfetch import __version__
 from pyfetch.config import load_config
 from pyfetch.engine import run_downloads
 from pyfetch.exceptions import PyFetchError, ValidationError
-from pyfetch.models import DownloadJob
+from pyfetch.models import DownloadJob, DownloadStatus
 from pyfetch.progress import DownloadProgress
+from pyfetch.queue_runner import (
+    execute_persistent_jobs,
+    prepare_queue,
+    queue_lock,
+)
 from pyfetch.retry import download_with_retries
+from pyfetch.storage import DownloadRepository
 
 app = typer.Typer(
     name="pyfetch",
@@ -28,7 +35,7 @@ console = Console()
 
 
 def version_callback(value: bool) -> None:
-    """Display the application version and exit."""
+    """Display the installed application version."""
     if value:
         typer.echo(f"PyFetch {__version__}")
         raise typer.Exit()
@@ -52,18 +59,17 @@ def main(
 
 @app.command()
 def doctor() -> None:
-    """Check basic application installation."""
+    """Show installation and feature information."""
     console.print(
         Panel(
             "[bold green]PyFetch is installed successfully![/bold green]\n"
             f"Version: {__version__}\n"
-            "Environment: Python CLI\n"
-            "Async file streaming: Available (M3)\n"
+            "Async streaming: Available (M3)\n"
             "Concurrent downloads: Available (M4)\n"
             "Live progress: Available (M5)\n"
-            "Retries and exponential backoff: Available (M6)\n"
-            "Persistent queue: Not implemented yet\n"
-            "Pause/resume: Not implemented yet",
+            "Retries: Available (M6)\n"
+            "Persistent SQLite queue: Available (M7)\n"
+            "HTTP Range resume: Not implemented yet",
             title="PyFetch Doctor",
             border_style="cyan",
         )
@@ -74,26 +80,22 @@ def doctor() -> None:
 def fetch(
     url: Annotated[
         str,
-        typer.Argument(
-            help="HTTP or HTTPS URL to download.",
-        ),
+        typer.Argument(help="HTTP or HTTPS download URL."),
     ],
     filename: Annotated[
         str,
-        typer.Argument(
-            help="Filename to save.",
-        ),
+        typer.Argument(help="Output filename."),
     ],
     destination: Annotated[
         Path | None,
         typer.Option(
             "--destination",
             "-d",
-            help="Override the configured download folder.",
+            help="Destination directory.",
         ),
     ] = None,
 ) -> None:
-    """Download one file with progress and safe retries."""
+    """Download one file immediately, without persistent queueing."""
     try:
         config = load_config()
 
@@ -129,7 +131,7 @@ def fetch(
         raise typer.Exit(code=130) from None
 
     except PyFetchError as exc:
-        console.print(f"[bold red]Download failed:[/bold red] {exc}")
+        console.print(f"[red]Download failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -189,15 +191,12 @@ def _load_batch_manifest(
 def batch(
     manifest: Annotated[
         Path,
-        typer.Argument(
-            help="Path to a JSON batch manifest.",
-        ),
+        typer.Argument(help="JSON batch manifest."),
     ],
 ) -> None:
-    """Download a JSON batch with concurrency and safe retries."""
+    """Download files from a manifest without storing queue history."""
     try:
         config = load_config()
-
         jobs = _load_batch_manifest(
             manifest,
             config.download_dir,
@@ -236,6 +235,178 @@ def batch(
             line += f" | {job.error_message}"
 
         console.print(line)
+
+    console.print(
+        f"Completed: {result.completed} | "
+        f"Failed: {result.failed} | "
+        f"Cancelled: {result.cancelled}"
+    )
+
+    if result.failed or result.cancelled:
+        raise typer.Exit(code=1)
+
+
+def _print_jobs(
+    jobs: list[DownloadJob],
+    *,
+    title: str,
+) -> None:
+    """Display saved jobs without exposing URL credentials or tokens."""
+    table = Table(title=title)
+
+    table.add_column("ID", overflow="fold")
+    table.add_column("Filename")
+    table.add_column("Status")
+    table.add_column("Bytes", justify="right")
+    table.add_column("Retries", justify="right")
+
+    for job in jobs:
+        total = str(job.total_bytes) if job.total_bytes is not None else "unknown"
+
+        table.add_row(
+            job.id[:8],
+            job.filename,
+            job.status.value,
+            f"{job.downloaded_bytes:,} / {total}",
+            str(job.retry_count),
+        )
+
+    console.print(table)
+
+
+@app.command("add")
+def add_job(
+    url: Annotated[
+        str,
+        typer.Argument(help="HTTP or HTTPS download URL."),
+    ],
+    filename: Annotated[
+        str,
+        typer.Argument(help="Output filename."),
+    ],
+    destination: Annotated[
+        Path | None,
+        typer.Option(
+            "--destination",
+            "-d",
+            help="Destination directory.",
+        ),
+    ] = None,
+) -> None:
+    """Add a download to the SQLite queue without starting it."""
+    try:
+        config = load_config()
+        repository = DownloadRepository()
+
+        job = DownloadJob(
+            url=url,
+            filename=filename,
+            destination=(
+                destination if destination is not None else config.download_dir
+            ),
+        )
+
+        repository.add_job(job)
+
+    except (PyFetchError, OSError) as exc:
+        console.print(f"[red]Cannot add download:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]Added to queue:[/green] {job.filename}")
+    console.print(f"Job ID: {job.id}")
+
+
+@app.command("list")
+def list_jobs() -> None:
+    """List all stored download jobs."""
+    try:
+        repository = DownloadRepository()
+        jobs = repository.list_jobs()
+
+    except PyFetchError as exc:
+        console.print(f"[red]Cannot list jobs:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not jobs:
+        console.print("No saved download jobs.")
+        return
+
+    _print_jobs(jobs, title="PyFetch Download Queue")
+
+
+@app.command("history")
+def history() -> None:
+    """Show completed, failed, and cancelled download jobs."""
+    try:
+        repository = DownloadRepository()
+        jobs = repository.list_jobs(
+            (
+                DownloadStatus.COMPLETED,
+                DownloadStatus.FAILED,
+                DownloadStatus.CANCELLED,
+            )
+        )
+
+    except PyFetchError as exc:
+        console.print(f"[red]Cannot load history:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not jobs:
+        console.print("No download history yet.")
+        return
+
+    _print_jobs(jobs, title="PyFetch Download History")
+
+
+@app.command("start")
+def start_queue() -> None:
+    """Recover and execute saved queued downloads."""
+    try:
+        config = load_config()
+        repository = DownloadRepository()
+
+        with queue_lock(repository.path):
+            recovered, jobs = prepare_queue(repository)
+
+            if recovered:
+                console.print(
+                    f"[yellow]Recovered {recovered} interrupted download(s).[/yellow]"
+                )
+
+            if not jobs:
+                console.print("No queued downloads.")
+                return
+
+            console.print(
+                f"[cyan]Starting {len(jobs)} queued downloads "
+                f"(maximum concurrent: {config.max_concurrency})[/cyan]"
+            )
+
+            with DownloadProgress(
+                jobs,
+                console=console,
+            ) as progress:
+                result = asyncio.run(
+                    execute_persistent_jobs(
+                        jobs,
+                        repository,
+                        config,
+                        on_progress=progress.update,
+                    )
+                )
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Queue interrupted by user.[/yellow]")
+        raise typer.Exit(code=130) from None
+
+    except (PyFetchError, OSError) as exc:
+        console.print(f"[red]Queue error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    for job in result.jobs:
+        console.print(
+            f"{job.filename}: {job.status.value} | retries: {job.retry_count}"
+        )
 
     console.print(
         f"Completed: {result.completed} | "

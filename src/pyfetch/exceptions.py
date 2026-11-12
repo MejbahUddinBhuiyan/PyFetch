@@ -45,3 +45,11 @@ class DownloadNetworkError(DownloadError):
 
 class DownloadFileError(DownloadError):
     """Raised when a download file cannot be written or published."""
+
+
+class StorageError(PyFetchError):
+    """Raised when persistent queue storage fails."""
+
+
+class QueueLockedError(PyFetchError):
+    """Raised when another process already owns the queue runner."""
