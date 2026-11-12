@@ -11,11 +11,11 @@ from rich.panel import Panel
 
 from pyfetch import __version__
 from pyfetch.config import load_config
-from pyfetch.downloader import download_file
 from pyfetch.engine import run_downloads
 from pyfetch.exceptions import PyFetchError, ValidationError
 from pyfetch.models import DownloadJob
 from pyfetch.progress import DownloadProgress
+from pyfetch.retry import download_with_retries
 
 app = typer.Typer(
     name="pyfetch",
@@ -58,9 +58,11 @@ def doctor() -> None:
             "[bold green]PyFetch is installed successfully![/bold green]\n"
             f"Version: {__version__}\n"
             "Environment: Python CLI\n"
-            "Download engine: Basic streaming available (M3)\n"
-            "Concurrent batch downloads: Available (M4)\n"
-            "Live progress tracking: Available (M5)\n"
+            "Async file streaming: Available (M3)\n"
+            "Concurrent downloads: Available (M4)\n"
+            "Live progress: Available (M5)\n"
+            "Retries and exponential backoff: Available (M6)\n"
+            "Persistent queue: Not implemented yet\n"
             "Pause/resume: Not implemented yet",
             title="PyFetch Doctor",
             border_style="cyan",
@@ -91,7 +93,7 @@ def fetch(
         ),
     ] = None,
 ) -> None:
-    """Download one file safely with a live progress display."""
+    """Download one file with progress and safe retries."""
     try:
         config = load_config()
 
@@ -110,7 +112,7 @@ def fetch(
             console=console,
         ) as progress:
             asyncio.run(
-                download_file(
+                download_with_retries(
                     job,
                     config,
                     on_progress=progress.update,
@@ -120,6 +122,7 @@ def fetch(
         console.print("[bold green]Download completed![/bold green]")
         console.print(f"File: {job.file_path}")
         console.print(f"Downloaded bytes: {job.downloaded_bytes:,}")
+        console.print(f"Retries used: {job.retry_count}")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Download interrupted by user.[/yellow]")
@@ -191,7 +194,7 @@ def batch(
         ),
     ],
 ) -> None:
-    """Download multiple files with live progress and concurrency limits."""
+    """Download a JSON batch with concurrency and safe retries."""
     try:
         config = load_config()
 
@@ -202,7 +205,8 @@ def batch(
 
         console.print(
             f"[cyan]Starting {len(jobs)} downloads "
-            f"(maximum concurrent: {config.max_concurrency})[/cyan]"
+            f"(maximum concurrent: {config.max_concurrency}, "
+            f"maximum retries: {config.max_retries})[/cyan]"
         )
 
         with DownloadProgress(
@@ -226,10 +230,12 @@ def batch(
         raise typer.Exit(code=1) from exc
 
     for job in result.jobs:
+        line = f"{job.filename}: {job.status.value} | retries: {job.retry_count}"
+
         if job.error_message:
-            console.print(f"{job.filename}: {job.status.value} — {job.error_message}")
-        else:
-            console.print(f"{job.filename}: {job.status.value}")
+            line += f" | {job.error_message}"
+
+        console.print(line)
 
     console.print(
         f"Completed: {result.completed} | "

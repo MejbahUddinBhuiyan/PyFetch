@@ -1,4 +1,4 @@
-"""Concurrent download scheduling on top of the single-file downloader."""
+"""Concurrent download scheduling with independent retry handling."""
 
 import asyncio
 import os
@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pyfetch.config import DownloadConfig
-from pyfetch.downloader import ProgressCallback, download_file
+from pyfetch.downloader import ProgressCallback
 from pyfetch.exceptions import DownloadError, ValidationError
 from pyfetch.models import DownloadJob, DownloadStatus
+from pyfetch.retry import download_with_retries
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +67,7 @@ async def run_downloads(
     *,
     on_progress: ProgressCallback | None = None,
 ) -> BatchResult:
-    """Download multiple files within the concurrency limit.
-
-    Known download failures do not stop unrelated jobs.
-    Cancelling the batch cancels unfinished child tasks.
-    """
+    """Run independent downloads within a concurrency limit."""
     snapshot = tuple(jobs)
 
     _validate_batch(snapshot)
@@ -81,23 +78,22 @@ async def run_downloads(
     semaphore = asyncio.Semaphore(config.max_concurrency)
 
     async def worker(job: DownloadJob) -> None:
-        """Execute a download when a semaphore slot is available."""
+        """Download one file and handle its expected failures."""
         try:
             async with semaphore:
                 try:
-                    await download_file(
+                    await download_with_retries(
                         job,
                         config,
                         on_progress=on_progress,
                     )
 
                 except DownloadError:
-                    # The downloader has already recorded
-                    # the failure on this individual job.
+                    # The downloader/retry controller records
+                    # the final failure on this individual job.
                     pass
 
         except asyncio.CancelledError:
-            # Waiting jobs may never reach download_file().
             if job.status is DownloadStatus.QUEUED:
                 job.status = DownloadStatus.CANCELLED
                 job.error_message = "Batch cancelled before download started."

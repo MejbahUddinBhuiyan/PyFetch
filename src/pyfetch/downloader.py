@@ -1,4 +1,4 @@
-"""Single-file asynchronous streaming download implementation."""
+"""Single-attempt asynchronous HTTP file downloader."""
 
 import asyncio
 import os
@@ -29,8 +29,8 @@ async def _create_partial_file(destination: Path) -> Path:
         exist_ok=True,
     )
 
-    # This short synchronous operation avoids a cancellation
-    # point between file creation and recording its path.
+    # Avoid a cancellation point between creation
+    # and recording the temporary filename.
     fd, name = tempfile.mkstemp(
         prefix=".pyfetch-",
         suffix=".part",
@@ -47,7 +47,11 @@ async def download_file(
     *,
     on_progress: ProgressCallback | None = None,
 ) -> DownloadJob:
-    """Download one HTTP(S) file without overwriting existing files."""
+    """Perform one streamed HTTP download attempt.
+
+    Existing destination files are never overwritten.
+    Partial files are discarded after handled failures.
+    """
     if job.status is not DownloadStatus.QUEUED:
         raise DownloadError("Only queued download jobs can be started.")
 
@@ -78,7 +82,8 @@ async def download_file(
             async with session.get(job.url) as response:
                 if response.status != 200:
                     raise DownloadHTTPError(
-                        f"HTTP {response.status}: expected HTTP 200."
+                        f"HTTP {response.status}: expected HTTP 200.",
+                        status_code=response.status,
                     )
 
                 job.total_bytes = response.content_length
@@ -86,7 +91,10 @@ async def download_file(
                 if on_progress is not None:
                     on_progress(job)
 
-                async with aiofiles.open(partial_path, "wb") as output:
+                async with aiofiles.open(
+                    partial_path,
+                    "wb",
+                ) as output:
                     async for chunk in response.content.iter_chunked(config.chunk_size):
                         await output.write(chunk)
                         job.downloaded_bytes += len(chunk)
@@ -99,9 +107,9 @@ async def download_file(
                 "Received byte count differs from Content-Length."
             )
 
-        # Publish only after the transfer has completed.
-        # os.link refuses to replace an existing final file.
-        # This requires a filesystem that supports hard links.
+        # Safely publish the completed temporary file.
+        # os.link() fails when the destination exists.
+        # It requires filesystem hard-link support.
         os.link(partial_path, job.file_path)
 
         job.status = DownloadStatus.COMPLETED
@@ -124,14 +132,36 @@ async def download_file(
         job.error_message = "Destination file already exists; overwrite refused."
         raise DownloadFileError(job.error_message) from exc
 
-    except (aiohttp.ClientError, TimeoutError) as exc:
+    except aiohttp.ClientError as exc:
         job.status = DownloadStatus.FAILED
+
+        # Certificate and TLS handshake failures should
+        # not be retried with the same unchanged settings.
+        retryable = not isinstance(
+            exc,
+            aiohttp.ClientSSLError,
+        )
+
         job.error_message = "Network connection or HTTP transfer failed."
-        raise DownloadNetworkError(job.error_message) from exc
+
+        raise DownloadNetworkError(
+            job.error_message,
+            retryable=retryable,
+        ) from exc
+
+    except TimeoutError as exc:
+        job.status = DownloadStatus.FAILED
+        job.error_message = "HTTP request timed out."
+
+        raise DownloadNetworkError(
+            job.error_message,
+            retryable=True,
+        ) from exc
 
     except OSError as exc:
         job.status = DownloadStatus.FAILED
         job.error_message = "Could not write or publish the download file."
+
         raise DownloadFileError(job.error_message) from exc
 
     finally:

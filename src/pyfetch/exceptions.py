@@ -14,15 +14,33 @@ class ConfigError(PyFetchError):
 
 
 class DownloadError(PyFetchError):
-    """Base error for download operations."""
+    """Base exception for download operations."""
 
 
 class DownloadHTTPError(DownloadError):
-    """Raised when the server returns an unacceptable HTTP status."""
+    """Raised for an unacceptable HTTP response status."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class DownloadNetworkError(DownloadError):
     """Raised when a download fails during network transfer."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class DownloadFileError(DownloadError):
