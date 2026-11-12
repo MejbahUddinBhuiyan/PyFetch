@@ -26,8 +26,7 @@ async def _create_partial_file(destination: Path) -> Path:
         exist_ok=True,
     )
 
-    fd, name = await asyncio.to_thread(
-        tempfile.mkstemp,
+    fd, name = tempfile.mkstemp(
         prefix=".pyfetch-",
         suffix=".part",
         dir=destination,
@@ -122,7 +121,4 @@ async def download_file(
 
     finally:
         if partial_path is not None:
-            await asyncio.to_thread(
-                partial_path.unlink,
-                missing_ok=True,
-            )
+            partial_path.unlink(missing_ok=True)

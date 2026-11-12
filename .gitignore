@@ -47,3 +47,7 @@ pyfetch.json
 
 # Local HTTP test server
 test_server/
+
+# Local batch testing
+batch-test.json
+batch-test/
