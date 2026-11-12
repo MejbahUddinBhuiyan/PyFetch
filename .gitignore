@@ -42,3 +42,5 @@ downloads/
 
 # Generated reports
 reports/
+# Local PyFetch configuration
+pyfetch.json
